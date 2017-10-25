@@ -313,32 +313,55 @@ data.sub <- qtm[qtm$mem_no %in% topmems, ]
 ggplot(aes(x=t,y=rev_krw_sum, colour=factor(mem_no)), data=data.sub) +
   geom_line()
 
+
 pds <- unique(qtm$pd)
 
+## Treatment group
+## Members Joined within first 2 months
+mem.treat <- c()
+for (i in 1:length(fl.lst)) {
+  er <- fl.lst[[i]]$follower$follower_mem_no
+  ed <- fl.lst[[i]]$follower$followed_mem_no
+  mem.treat <- unique(c(mem.treat, er, ed))
+}
+
+## create CausalImpact Data Frame
 dfqm <- data.frame(y=rep(NA,length(pds)),x=NA)
 rownames(dfqm) <- pds
-
 for (i in 1:length(pds)) {
   pdi <- pds[i]
   last.date <- getYearMonthLastDate(pdi)
-  #
-  treat.idx <- which(!is.na(mem$follower_reg_date) & mem$follower_reg_date < last.date)
-  ctrl.idx <- which( is.na(mem$follower_reg_date) |  mem$follower_reg_date >= last.date)
+  # INDEXES FOR GROUPS
+  # treat.idx <- which(!is.na(mem$follower_reg_date) & mem$follower_reg_date < last.date)
+  # ctrl.idx <- which( is.na(mem$follower_reg_date) |  mem$follower_reg_date >= last.date)
+  treat.idx <- which(mem$mem_no %in% mem.treat)
+  ctrl.idx <- which( !(mem$mem_no %in% mem.treat) )
   mem.treat <- mem$mem_no[ treat.idx ]
   mem.ctrl <- mem$mem_no[ ctrl.idx ]
-  #
+  # REVENUE BY GROUP IN PERIOD
   qtm.pd.sub <- qtm[ qtm$pd == pdi , ]
   sums.treat <- qtm.pd.sub$rev_krw_sum[ qtm.pd.sub$mem_no %in% mem.treat ]
   sums.ctrl  <- qtm.pd.sub$rev_krw_sum[ qtm.pd.sub$mem_no %in% mem.ctrl ]
-  #
-  n.treat <- fl.cnt$follower_cnt[ fl.cnt$pd == pdi ]
-  n.ctrl <- fl.cnt$follower_cnt[ fl.cnt$pd == pdi ]
-  n.all <- fl.cnt$mem_cnt[ fl.cnt$pd == pdi ]
-  #
-  dfqm$y[i] <- 
-  dfqm$x[i] <- 
+  # COUNTS BY GROUP 
+  # n.treat <- fl.cnt$follower_cnt[ fl.cnt$pd == pdi ]
+  n.all   <- fl.cnt$mem_cnt[ fl.cnt$pd == pdi ]
+  n.treat <- length(treat.idx)
+  n.ctrl  <- n.all - n.treat
+  # CAUSALITY DATA FRAME
+  dfqm$y[i] <- ifelse(n.treat==0, 0,  sums.treat / n.treat )
+  dfqm$x[i] <- ifelse(n.ctrl==0, 0,  sums.ctrl / n.ctrl )
 }
 
+
+pre <- c(1, which(rownames(dfqm)=='2016-01')-1)
+post <- c(which(rownames(dfqm)=='2016-01'), nrow(dffsw))
+
+impact <- CausalImpact(dfqm, pre, post,
+                       alpha=0.05, model.args=list(nseasons=12))
+plot(impact)
+summary(impact)
+summary(impact, "report")
+impact$summary
 
 #----------------------------------------------------
 
