@@ -192,16 +192,22 @@ mem <- merge(mem, followed, by.x='mem_no', by.y='followed_mem_no', all.x = T)
 
 ##---------------- MONTHLY FOLLOWER RELATIONS ----------------------
 
-months <- c("2015-12", "2016-01", "2016-02", "2016-03", 
-            "2016-04", "2016-05", "2016-06", "2016-07", "2016-08",
-            "2016-09", "2016-10", "2016-11", 
-            "2016-12", "2017-01", "2017-02", "2017-03", "2017-04",
+months <- c("2012-01", "2012-02", "2012-03", "2012-04", "2012-05", "2012-06", "2012-07", "2012-08",
+            "2012-09", "2012-10", "2012-11", "2012-12", "2013-01", "2013-02", "2013-03", "2013-04",
+            "2013-05", "2013-06", "2013-07", "2013-08", "2013-09", "2013-10", "2013-11", "2013-12",
+            "2014-01", "2014-02", "2014-03", "2014-04", "2014-05", "2014-06", "2014-07", "2014-08",
+            "2014-09", "2014-10", "2014-11", "2014-12", "2015-01", "2015-02", "2015-03", "2015-04",
+            "2015-05", "2015-06", "2015-07", "2015-08", "2015-09", "2015-10", "2015-11", "2015-12",
+            "2016-01", "2016-02", "2016-03", "2016-04", "2016-05", "2016-06", "2016-07", "2016-08",
+            "2016-09", "2016-10", "2016-11", "2016-12", "2017-01", "2017-02", "2017-03", "2017-04",
             "2017-05", "2017-06", "2017-07", "2017-08", "2017-09")
 fl.cnt <- data.frame( pd=months,
                       follower_cnt=rep(NA,length(months)),
                       followed_cnt=rep(NA,length(months)),
                       unique_mem_cnt=rep(NA,length(months)),
-                      relations_cnt=rep(NA,length(months)), stringsAsFactors = F)
+                      relations_cnt=rep(NA,length(months)), 
+                      mem_cnt=rep(NA,length(months)), 
+                      stringsAsFactors = F)
 fl.lst <- list()
 
 for(i in 1:length(months)) {
@@ -211,27 +217,37 @@ for(i in 1:length(months)) {
   y <- tmp[1]
   m <- tmp[2]
   d <- getMonthDays(m)
-  follower <- fetch(sprintf('
-                            SELECT follower_mem_no, COUNT(follower_mem_no) follower_cnt
+  follower <- fetch(sprintf('SELECT follower_mem_no, COUNT(follower_mem_no) follower_cnt
                             FROM cconma_memberfollow
                             WHERE DATE(reg_date) <= DATE("%d-%d-%d")
                             GROUP BY follower_mem_no; ',y,m,d))
-  followed <- fetch(sprintf('
-                            SELECT following_mem_no followed_mem_no, COUNT(following_mem_no) followed_cnt
+  followed <- fetch(sprintf('SELECT following_mem_no followed_mem_no, COUNT(following_mem_no) followed_cnt
                             FROM cconma_memberfollow
                             WHERE DATE(reg_date) <= DATE("%d-%d-%d")
                             GROUP BY followed_mem_no; ',y,m,d))
-  total <- fetch(sprintf('
-                         SELECT COUNT(DISTINCT id) cnt
+  total <- fetch(sprintf('SELECT COUNT(DISTINCT id) cnt
                          FROM cconma_memberfollow
                          WHERE DATE(reg_date) <= DATE("%d-%d-%d"); ',y,m,d))
-  fl.lst[[pd]] <- list(follower=follower, followed=followed)
-  fl.cnt$follower_cnt[fl.cnt$pd == pd] <- length(unique(follower$follower_mem_no))
-  fl.cnt$followed_cnt[fl.cnt$pd == pd] <- length(unique(followed$followed_mem_no))
-  fl.cnt$unique_mem_cnt[fl.cnt$pd == pd] <- length(unique(c(follower$follower_mem_no, followed$followed_mem_no)))
-  fl.cnt$relations_cnt[fl.cnt$pd == pd] <- total$cnt
+  all <- fetch(sprintf('SELECT COUNT(DISTINCT mem_no) cnt
+                         FROM cconma_member
+                         WHERE DATE(reg_date) <= DATE("%d-%d-%d"); ',y,m,d))
+  if (nrow(follower) > 0 | nrow(followed) > 0) {
+    fl.lst[[pd]] <- list(follower=follower, followed=followed)
+    fl.cnt$follower_cnt[fl.cnt$pd == pd] <- length(unique(follower$follower_mem_no))
+    fl.cnt$followed_cnt[fl.cnt$pd == pd] <- length(unique(followed$followed_mem_no))
+    fl.cnt$unique_mem_cnt[fl.cnt$pd == pd] <- length(unique(c(follower$follower_mem_no, followed$followed_mem_no)))
+    fl.cnt$relations_cnt[fl.cnt$pd == pd] <- total$cnt
+  } else {
+    fl.cnt$follower_cnt[fl.cnt$pd == pd] <- 0
+    fl.cnt$followed_cnt[fl.cnt$pd == pd] <- 0
+    fl.cnt$unique_mem_cnt[fl.cnt$pd == pd] <- 0
+    fl.cnt$relations_cnt[fl.cnt$pd == pd] <- 0
+  }
+
+  fl.cnt$mem_cnt[fl.cnt$pd == pd] <- all$cnt
 }
 fl.cnt <- cbind(pd_last_date=sapply(fl.cnt$pd, getYearMonthLastDate), fl.cnt)
+fl.cnt$pct_unique <-  fl.cnt$unique_mem_cnt / fl.cnt$mem_cnt
 
 # vars <- c("follower_cnt", "followed_cnt", "unique_mem_cnt", "relations_cnt")
 # matplot(x= as.numeric(as.factor(fl.cnt$pd)), y= fl.cnt[,-c(1:2)], type='l')
@@ -305,8 +321,22 @@ rownames(dfqm) <- pds
 for (i in 1:length(pds)) {
   pdi <- pds[i]
   last.date <- getYearMonthLastDate(pdi)
-  mem.treat <- mem
-  
+  #
+  treat.idx <- which(!is.na(mem$follower_reg_date) & mem$follower_reg_date < last.date)
+  ctrl.idx <- which( is.na(mem$follower_reg_date) |  mem$follower_reg_date >= last.date)
+  mem.treat <- mem$mem_no[ treat.idx ]
+  mem.ctrl <- mem$mem_no[ ctrl.idx ]
+  #
+  qtm.pd.sub <- qtm[ qtm$pd == pdi , ]
+  sums.treat <- qtm.pd.sub$rev_krw_sum[ qtm.pd.sub$mem_no %in% mem.treat ]
+  sums.ctrl  <- qtm.pd.sub$rev_krw_sum[ qtm.pd.sub$mem_no %in% mem.ctrl ]
+  #
+  n.treat <- fl.cnt$follower_cnt[ fl.cnt$pd == pdi ]
+  n.ctrl <- fl.cnt$follower_cnt[ fl.cnt$pd == pdi ]
+  n.all <- fl.cnt$mem_cnt[ fl.cnt$pd == pdi ]
+  #
+  dfqm$y[i] <- 
+  dfqm$x[i] <- 
 }
 
 

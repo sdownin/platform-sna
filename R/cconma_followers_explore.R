@@ -168,11 +168,27 @@ GROUP BY mem_no
 HAVING order_cnt > 0
 ORDER BY order_cnt desc;
 '
-con <- dbConnect(RMySQL::MySQL(), dbname = "cconma2", user="root", password="", port=3306)
-rs <- dbSendQuery(con, q)
-mem <- dbFetch(rs, n= -1); dbDisconnect(con)
+mem <- fetch(q)
 mem$reg_date <- lubridate::ymd(mem$reg_date)
 
+
+## follower relations
+follower <- fetch('
+SELECT follower_mem_no, 
+MIN(DATE(reg_date)) follower_reg_date
+FROM cconma_memberfollow
+GROUP BY follower_mem_no;')
+follower$follower_reg_date <- ymd(follower$follower_reg_date)
+## following relations
+followed <- fetch('
+SELECT following_mem_no followed_mem_no, 
+MIN(DATE(reg_date)) followed_reg_date
+FROM cconma_memberfollow
+GROUP BY followed_mem_no;')
+followed$followed_reg_date <- ymd(followed$followed_reg_date)
+
+mem <- merge(mem, follower, by.x='mem_no', by.y='follower_mem_no', all.x = T)
+mem <- merge(mem, followed, by.x='mem_no', by.y='followed_mem_no', all.x = T)
 
 ##---------------- MONTHLY FOLLOWER RELATIONS ----------------------
 
@@ -230,26 +246,68 @@ ggplot(aes(x=pd_last_date, y=value, colour=group), data=fl.cnt.w) +
   theme_bw()
 
 
+
+# #---------------- QUANTITY BY MONTH ------------------------
+# 
+# qty <- fetch('
+#              SELECT CAST(MONTH(order_date) AS UNSIGNED) month,
+#              CAST(YEAR(order_date) AS UNSIGNED) yr,
+#              DATE_FORMAT(order_date,"%Y-%m") pd,
+#              SUM(amount) rev_krw_sum,
+#              AVG(amount) rev_krw_avg,
+#              STD(amount) rev_krw_std,
+#              MAX(amount) rev_krw_max,
+#              MIN(amount) rev_krw_min,
+#              COUNT(mem_no) cnt
+#              FROM cconma_order co
+#              GROUP BY pd
+#              ORDER BY pd asc;
+#              ')
+# qty$t <- as.numeric(as.factor(qty$pd))
+# 
+# topmems <- mem$mem_no[c(2,3,4,10000,10001,10002)]
+# data.sub <- qty[qty$mem_no %in% topmems, ]
+# ggplot(aes(x=t,y=rev_krw_sum, colour=factor(mem_no)), data=data.sub) +
+#   geom_line()
+
+
+
+
 #---------------- QUANTITY BY MEM_NO, MONTH ------------------------
 
-qty <- fetch('
+qtm <- fetch('
   SELECT mem_no,
   CAST(MONTH(order_date) AS UNSIGNED) month,
   CAST(YEAR(order_date) AS UNSIGNED) yr,
   DATE_FORMAT(order_date,"%Y-%m") pd,
   SUM(amount) rev_krw_sum,
   AVG(amount) rev_krw_avg,
-  STD(amount) rev_krw_std
+  STD(amount) rev_krw_std,
+  MAX(amount) rev_krw_max,
+  MIN(amount) rev_krw_min,
+  COUNT(amount) rev_krw_cnt
   FROM cconma_order co
   GROUP BY pd,mem_no
   ORDER BY pd asc;
 ')
-qty$t <- as.numeric(as.factor(qty$pd))
+qtm$t <- as.numeric(as.factor(qtm$pd))
 
-topmems <- c(512, 54, 1024, 1200) #mem$mem_no[2:6]
-data.sub <- qty[qty$mem_no %in% topmems, ]
+topmems <- mem$mem_no[c(2,3,4,10000,10001,10002)]
+data.sub <- qtm[qtm$mem_no %in% topmems, ]
 ggplot(aes(x=t,y=rev_krw_sum, colour=factor(mem_no)), data=data.sub) +
   geom_line()
+
+pds <- unique(qtm$pd)
+
+dfqm <- data.frame(y=rep(NA,length(pds)),x=NA)
+rownames(dfqm) <- pds
+
+for (i in 1:length(pds)) {
+  pdi <- pds[i]
+  last.date <- getYearMonthLastDate(pdi)
+  mem.treat <- mem
+  
+}
 
 
 #----------------------------------------------------
