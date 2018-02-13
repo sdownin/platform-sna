@@ -428,8 +428,8 @@ saveRDS(list(mem=mem,fl.cnt=fl.cnt,fl.lst=fl.lst,qtm=qtm), file="cconma_data_lis
 
 ##------------------CONTROL MEMBERS--------------------------------------
 mem.ord <- unique(qtm$mem_no)
-# mem.trt <- unique(c(fl.lst$`2017-09`$follower$follower_mem_no, fl.lst$`2017-09`$followed$followed_mem_no))
-mem.trt <- unique(c(fl.lst$`2017-09`$follower$follower_mem_no))
+mem.trt <- unique(c(fl.lst$`2017-09`$follower$follower_mem_no, fl.lst$`2017-09`$followed$followed_mem_no))
+# mem.trt <- unique(c(fl.lst$`2017-09`$follower$follower_mem_no))
 mem.ctrl <- mem.ord[which( !(mem.ord %in% mem.trt) )]
 cat(sprintf('ordered %s, treated %s, control %s', length(mem.ord),length(mem.trt),length(mem.ctrl)))
 ## limit to members who ordered and have long enough duration
@@ -443,98 +443,284 @@ sapply(fl.lst, function(x)sapply(x,nrow))
 
 ##------------------TREATMENT := FOLLOWER -------------------------------
 
-## period
-pd <- 9
-cat(names(fl.lst)[pd])
+l.pd <- list()
 
-## build GROUP samples list
-g <- list(y=data.frame(),  ## treatment data.frame
-          z1=data.frame(), ## control data.frame 1
-          z2=data.frame(), ## control data.frame 2
-          z=c(),           ## control mem_nos (1,2)
-          dropped=c()      ## droped mem_nos
-          )
-
-numrow <- nrow(fl.lst[[pd]]$follower)
-for(i in 1:numrow) {
-  mem_i <- mem[which(mem$mem_no == fl.lst[[pd]]$follower$follower_mem_no[i]), ]
-  z.sub <- df.ctrl$mem_no[which( !(df.ctrl$mem_no %in% g$z)
-                      & df.ctrl$gender==mem_i$gender
-                      & df.ctrl$married==mem_i$married
-                      & df.ctrl$age >= (mem_i$age - sd(mem$age,na.rm = T))
-                      & df.ctrl$age <= (mem_i$age + sd(mem$age,na.rm = T))
-                      & df.ctrl$avg_m_order_sum >= (mem_i$avg_m_order_sum - sd(mem$avg_m_order_sum,na.rm = T))
-                      & df.ctrl$avg_m_order_sum <= (mem_i$avg_m_order_sum + sd(mem$avg_m_order_sum,na.rm = T))
-                      )]
-  if (length(z.sub) < 2) {
-    g$dropped = c(g$dropped, mem_i$mem_no)
-  } else {
-    g$y <- rbind(g$y, mem_i)
-    z <- sample(z.sub,size = 2, replace = F)
-    g$z <- c(g$z, z)
-    g$z1 <- rbind(g$z1, mem[which(mem$mem_no==z[1]),])
-    g$z2 <- rbind(g$z2, mem[which(mem$mem_no==z[2]),])
-    if (nrow(g$y) != nrow(g$z1) | nrow(g$y) != nrow(g$z2)) stop('mismatch')
+for (pd in 2:20) {
+  
+  ## period
+  # pd <- 21
+  cat(names(fl.lst)[pd]);cat("\n")
+  
+  ## build GROUP samples list
+  g <- list(y=data.frame(),  ## treatment data.frame
+            z1=data.frame(), ## control data.frame 1
+            z2=data.frame(), ## control data.frame 2
+            z=c(),           ## control mem_nos (1,2)
+            dropped=c()      ## droped mem_nos
+  )
+  
+  mem.trt.pd <- unique(fl.lst[[pd]]$follower$follower_mem_no, fl.lst[[pd]]$followed$followed_mem_no)
+  len <- length(mem.trt.pd)
+  cat(len)
+  for(i in 1:len) {
+    mem_i <- mem[which(mem$mem_no == mem.trt.pd[i]), ]
+    z.sub <- df.ctrl$mem_no[which( !(df.ctrl$mem_no %in% g$z)
+                                   & !(df.ctrl$mem_no %in% mem.trt.pd)
+                                   & !(df.ctrl$mem_no %in% g$dropped)
+                                   & df.ctrl$gender==mem_i$gender
+                                   & df.ctrl$married==mem_i$married
+                                   & df.ctrl$age >= (mem_i$age - sd(mem$age,na.rm = T))
+                                   & df.ctrl$age <= (mem_i$age + sd(mem$age,na.rm = T))
+                                   & df.ctrl$avg_m_order_sum >= (mem_i$avg_m_order_sum - sd(mem$avg_m_order_sum,na.rm = T))
+                                   & df.ctrl$avg_m_order_sum <= (mem_i$avg_m_order_sum + sd(mem$avg_m_order_sum,na.rm = T))
+    )]
+    if (length(z.sub) < 2) {
+      g$dropped = c(g$dropped, mem_i$mem_no)
+    } else {
+      g$y <- rbind(g$y, mem_i)
+      z <- sample(z.sub,size = 2, replace = F)
+      g$z <- c(g$z, z)
+      g$z1 <- rbind(g$z1, df.ctrl[which(df.ctrl$mem_no==z[1]),])
+      g$z2 <- rbind(g$z2, df.ctrl[which(df.ctrl$mem_no==z[2]),])
+      if (nrow(g$y) != nrow(g$z1) | nrow(g$y) != nrow(g$z2)) stop('mismatch')
+    }
+    if (i %% 50 == 0) cat(sprintf('%.1f%s\n',100*i/len,'%'))
   }
-  if (i %% 50 == 0) cat(sprintf('%.1f%s\n',100*i/numrow,'%'))
-}; cat(sprintf('sample (treat, control): %s',nrow(g$y)))
-
-g$mem_no <- list(y=unique(g$y$mem_no),
-                 z1=unique(g$z1$mem_no),
-                 z2=unique(g$z2$mem_no))
-
-
-##------------ RUN CAUSAL IMPACT--------------------------------------
-
-
-## periods
-pds <- unique(qtm$pd)
-
-## CUTOFF DATES
-cut.date.start <- as.Date('2014-01-01')  ## '-01-25'
-cut.date.treat <- as.Date('2016-01-31')
-## GROUPS
-# TREATMENT: members who existed a year before and eventually have relations
-mem.treat <- g$mem_no$z2
-# CONTROL: members who existed a year before and never have a relation (or recommended anyone)
-mem.ctrl <- g$mem_no$z1
-# mem.ctrl <- sample(mem.ctrl, 10*length(mem.treat), replace = F)
-cat(sprintf("\n%s treatment members, %s control members\n", length(mem.treat), length(mem.ctrl)))
-## create CausalImpact Data Frame
-pds <- pds[ which(pds >= format.Date(cut.date.start, '%Y-%m') ) ]
-dfqm <- data.frame(y=rep(NA,length(pds)),x=NA)
-rownames(dfqm) <- pds
-for (i in 1:length(pds)) {
-  pdi <- pds[i]
-  last.date <- getYearMonthLastDate(pdi)
-  # REVENUE BY GROUP IN PERIOD
-  qtm.pd.sub <- qtm[ qtm$pd == pdi , ]
-  sums.treat <- qtm.pd.sub$rev_krw_sum[ qtm.pd.sub$mem_no %in% mem.treat ]
-  sums.ctrl  <- qtm.pd.sub$rev_krw_sum[ qtm.pd.sub$mem_no %in% mem.ctrl ]
-  # COUNTS BY GROUP 
-  n.treat <- length(mem.treat)
-  n.ctrl <- length(mem.ctrl)
-  # CAUSALITY DATA FRAME
-  KRW_USD <- 1120
-  dfqm$y[i] <- ifelse(n.treat==0, 0,  sums.treat / n.treat ) / KRW_USD
-  dfqm$x[i] <- ifelse(n.ctrl==0, 0,  sums.ctrl / n.ctrl )  / KRW_USD
+  
+  cat(sprintf('sample (treat, control): %s',nrow(g$y)))
+  g$mem_no <- list(y=unique(g$y$mem_no),
+                   z1=unique(g$z1$mem_no),
+                   z2=unique(g$z2$mem_no))
+  
+  ## double check exclusive samples
+  all(
+    !any(g$y$mem_no %in% g$z1$mem_no) 
+    & !any(g$y$mem_no %in% g$z2$mem_no) 
+    & !any(g$z1$mem_no %in% g$z2$mem_no)
+  )
+  
+  ##------------ RUN CAUSAL IMPACT--------------------------------------
+  
+  
+  ## periods
+  pds <- unique(qtm$pd)
+  
+  ## CUTOFF DATES
+  cut.date.start <- as.Date('2014-01-01')  ## '-01-25'
+  cut.date.treat <- as.Date('2016-01-31')
+  ## GROUPS
+  # TREATMENT: members who existed a year before and eventually have relations
+  mem.treat <- g$mem_no$y
+  # CONTROL: members who existed a year before and never have a relation (or recommended anyone)
+  mem.ctrl <- g$mem_no$z2
+  # mem.ctrl <- sample(mem.ctrl, 10*length(mem.treat), replace = F)
+  cat(sprintf("\n%s treatment members, %s control members\n", length(mem.treat), length(mem.ctrl)))
+  ## create CausalImpact Data Frame
+  pds <- pds[ which(pds >= format.Date(cut.date.start, '%Y-%m') ) ]
+  dfqm <- data.frame(y=rep(NA,length(pds)),x=NA)
+  rownames(dfqm) <- pds
+  for (i in 1:length(pds)) {
+    pdi <- pds[i]
+    last.date <- getYearMonthLastDate(pdi)
+    # REVENUE BY GROUP IN PERIOD
+    qtm.pd.sub <- qtm[ qtm$pd == pdi , ]
+    sums.treat <- qtm.pd.sub$rev_krw_sum[ qtm.pd.sub$mem_no %in% mem.treat ]
+    sums.ctrl  <- qtm.pd.sub$rev_krw_sum[ qtm.pd.sub$mem_no %in% mem.ctrl ]
+    # COUNTS BY GROUP 
+    n.treat <- length(mem.treat)
+    n.ctrl <- length(mem.ctrl)
+    # CAUSALITY DATA FRAME
+    KRW_USD <- 1120
+    dfqm$y[i] <- ifelse(n.treat==0, 0,  log(sums.treat) / n.treat ) / KRW_USD
+    dfqm$x[i] <- ifelse(n.ctrl==0, 0,  log(sums.ctrl) / n.ctrl )  / KRW_USD
+  }
+  ## adjust dates format to create pre, post periods
+  dates <- as.Date(unname(sapply(rownames(dfqm),function(x)getYearMonthLastDate(x))))
+  pre <- c(dates[1], dates[which(dates==cut.date.treat)-1 ] )
+  post <- c(dates[ which(dates==cut.date.treat) ], dates[length(dates)])
+  ## format dates
+  dfqmz <- zoo(cbind(dfqm$y,dfqm$x), dates)
+  ##
+  ## RUN CausalImpact
+  ##
+  impact <- CausalImpact(dfqmz, pre, post,
+                         alpha=0.05, model.args=list(nseasons=12,
+                                                     dynamic.regression=F))
+  plot(impact)
+  summary(impact)
+  
+  # summary(impact, "report")
+  # impact$summary
+  # 
+  l.pd[[pd]] <- list(g=g, dfqm=dfqm, dfqmz=dfqmz, impact=impact)
+  
+  saveRDS(l.pd, file="cconma_analysis_periods_list.rds")
+  
 }
-## adjust dates format to create pre, post periods
-dates <- as.Date(unname(sapply(rownames(dfqm),function(x)getYearMonthLastDate(x))))
-pre <- c(dates[1], dates[which(dates==cut.date.treat)-1 ] )
-post <- c(dates[ which(dates==cut.date.treat) ], dates[length(dates)])
-## format dates
-dfqmz <- zoo(cbind(dfqm$y,dfqm$x), dates)
-##
-## RUN CausalImpact
-##
-impact <- CausalImpact(dfqmz, pre, post,
-                       alpha=0.05, model.args=list(nseasons=12))
-plot(impact)
-summary(impact)
+names(l.pd)[1:20] <- names(fl.lst)[1:20]
+saveRDS(l.pd, file="cconma_analysis_periods_list_fixed_cutoff_pd.rds")
 
-summary(impact, "report")
-impact$summary
+
+res <- sapply(l.pd[2:length(l.pd)],function(x){
+  summary <- x$impact$summary
+  return(c(avg=summary$AbsEffect[1],
+           l95=summary$AbsEffect.lower[1],
+           u95=summary$AbsEffect.upper[1],
+           p=summary$p[1],
+           n=nrow(x$g$y))
+  )
+})
+res <- as.data.frame(t(res))
+saveRDS(res, file="cconma_analysis_RESULTS_fixed_cutoff_pd.rds")
+
+
+
+
+
+
+
+
+
+
+
+##-----------------------------------------------------------------------------
+## MOVING CUTOFF
+##----------------------------------------------------------------------------
+
+l.pd <- list()
+
+for (pd in 2:20) {
+  
+  ## period
+  # pd <- 21
+  cat(names(fl.lst)[pd]);cat("\n")
+  
+  ## build GROUP samples list
+  g <- list(y=data.frame(),  ## treatment data.frame
+            z1=data.frame(), ## control data.frame 1
+            z2=data.frame(), ## control data.frame 2
+            z=c(),           ## control mem_nos (1,2)
+            dropped=c()      ## droped mem_nos
+  )
+  
+  mem.trt.pd <- unique(fl.lst[[pd]]$follower$follower_mem_no, fl.lst[[pd]]$followed$followed_mem_no)
+  len <- length(mem.trt.pd)
+  cat(len)
+  for(i in 1:len) {
+    mem_i <- mem[which(mem$mem_no == mem.trt.pd[i]), ]
+    z.sub <- df.ctrl$mem_no[which( !(df.ctrl$mem_no %in% g$z)
+                                   & !(df.ctrl$mem_no %in% mem.trt.pd)
+                                   & !(df.ctrl$mem_no %in% g$dropped)
+                                   & df.ctrl$gender==mem_i$gender
+                                   & df.ctrl$married==mem_i$married
+                                   & df.ctrl$age >= (mem_i$age - sd(mem$age,na.rm = T))
+                                   & df.ctrl$age <= (mem_i$age + sd(mem$age,na.rm = T))
+                                   & df.ctrl$avg_m_order_sum >= (mem_i$avg_m_order_sum - sd(mem$avg_m_order_sum,na.rm = T))
+                                   & df.ctrl$avg_m_order_sum <= (mem_i$avg_m_order_sum + sd(mem$avg_m_order_sum,na.rm = T))
+    )]
+    if (length(z.sub) < 2) {
+      g$dropped = c(g$dropped, mem_i$mem_no)
+    } else {
+      g$y <- rbind(g$y, mem_i)
+      z <- sample(z.sub,size = 2, replace = F)
+      g$z <- c(g$z, z)
+      g$z1 <- rbind(g$z1, df.ctrl[which(df.ctrl$mem_no==z[1]),])
+      g$z2 <- rbind(g$z2, df.ctrl[which(df.ctrl$mem_no==z[2]),])
+      if (nrow(g$y) != nrow(g$z1) | nrow(g$y) != nrow(g$z2)) stop('mismatch')
+    }
+    if (i %% 50 == 0) cat(sprintf('%.1f%s\n',100*i/len,'%'))
+  }
+  
+  cat(sprintf('sample (treat, control): %s',nrow(g$y)))
+  g$mem_no <- list(y=unique(g$y$mem_no),
+                   z1=unique(g$z1$mem_no),
+                   z2=unique(g$z2$mem_no))
+  
+  ## double check exclusive samples
+  all(
+    !any(g$y$mem_no %in% g$z1$mem_no) 
+    & !any(g$y$mem_no %in% g$z2$mem_no) 
+    & !any(g$z1$mem_no %in% g$z2$mem_no)
+  )
+  
+  ##------------ RUN CAUSAL IMPACT--------------------------------------
+  
+  
+  ## periods
+  # pds <- unique(qtm$pd)
+  
+  ## CUTOFF DATES
+  cut.date.start <- as.Date('2014-01-01')  ## '-01-25'    cat(names(fl.lst)[pd]);cat("\n")
+  cut.date.treat <- as.Date(getYearMonthLastDate(names(fl.lst)[pd])) ## as.Date('2016-01-31')
+  ## GROUPS
+  # TREATMENT: members who existed a year before and eventually have relations
+  mem.treat <- g$mem_no$y
+  # CONTROL: members who existed a year before and never have a relation (or recommended anyone)
+  mem.ctrl <- g$mem_no$z1
+  # mem.ctrl <- sample(mem.ctrl, 10*length(mem.treat), replace = F)
+  cat(sprintf("\n%s treatment members, %s control members\n", length(mem.treat), length(mem.ctrl)))
+  ## create CausalImpact Data Frame
+  pds <- pds[ which(pds >= format.Date(cut.date.start, '%Y-%m') ) ]
+  dfqm <- data.frame(y=rep(NA,length(pds)),x=NA)
+  rownames(dfqm) <- pds
+  for (i in 1:length(pds)) {
+    pdi <- pds[i]
+    last.date <- getYearMonthLastDate(pdi)
+    # REVENUE BY GROUP IN PERIOD
+    qtm.pd.sub <- qtm[ qtm$pd == pdi , ]
+    sums.treat <- qtm.pd.sub$rev_krw_sum[ qtm.pd.sub$mem_no %in% mem.treat ]
+    sums.ctrl  <- qtm.pd.sub$rev_krw_sum[ qtm.pd.sub$mem_no %in% mem.ctrl ]
+    # COUNTS BY GROUP 
+    n.treat <- length(mem.treat)
+    n.ctrl <- length(mem.ctrl)
+    # CAUSALITY DATA FRAME
+    # KRW_USD <- 1120
+    dfqm$y[i] <- ifelse(n.treat==0, 0,  log(sums.treat) / n.treat ) # / KRW_USD
+    dfqm$x[i] <- ifelse(n.ctrl==0, 0,  log(sums.ctrl) / n.ctrl )  # / KRW_USD
+  }
+  ## adjust dates format to create pre, post periods
+  dates <- as.Date(unname(sapply(rownames(dfqm),function(x)getYearMonthLastDate(x))))
+  pre <- c(dates[1], dates[which(dates==cut.date.treat)-1 ] )
+  post <- c(dates[ which(dates==cut.date.treat) ], dates[length(dates)])
+  ## format dates
+  dfqmz <- zoo(cbind(dfqm$y,dfqm$x), dates)
+  ##
+  ## RUN CausalImpact
+  ##
+  impact <- CausalImpact(dfqmz, pre, post,
+                         alpha=0.05, model.args=list(nseasons=12,
+                                                     dynamic.regression=F))
+  plot(impact)
+  summary(impact)
+  
+  # summary(impact, "report")
+  # impact$summary
+  # 
+  l.pd[[pd]] <- list(g=g, dfqm=dfqm, dfqmz=dfqmz, impact=impact)
+  
+  saveRDS(l.pd, file="cconma_analysis_periods_list_moving_cutoff.rds")
+  
+}
+names(l.pd)[1:20] <- names(fl.lst)[1:20]
+saveRDS(l.pd, file="cconma_analysis_periods_list_moving_cutoff_pd.rds")
+
+
+res <- sapply(l.pd[2:length(l.pd)],function(x){
+  summary <- x$impact$summary
+  return(c(avg=summary$AbsEffect[1],
+           l95=summary$AbsEffect.lower[1],
+           u95=summary$AbsEffect.upper[1],
+           p=summary$p[1],
+           n=nrow(x$g$y))
+  )
+})
+res <- as.data.frame(t(res))
+saveRDS(res, file="cconma_analysis_RESULTS_moving_cutoff_pd.rds")
+
+
+
+
+
 
 
 
