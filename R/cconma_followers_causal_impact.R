@@ -90,6 +90,10 @@ library(lubridate)
 library(CausalImpact)
 library(stringr)
 library(zoo)
+library(xergm)
+library(igraph)
+library(network)
+library(intergraph)
 
 
 ##
@@ -253,6 +257,49 @@ mem$age <- as.numeric((ymd('2017-09-30') - mem$birthdate) / 365.25)
 saveRDS(mem, file="cconma_mem_df.rds")
 ##--------------------------------------------------------------------------------------------
 
+
+
+#----------------------------------MEMBER ALL ---------------------------------------------
+q <- '
+SELECT cm.mem_no,
+COUNT(o.mem_no) as order_cnt,
+SUM(o.amount) as order_sum,
+TIMESTAMPDIFF(MONTH, DATE(cm.reg_date), "2017-09-30") as num_months,
+COUNT(o.mem_no) / TIMESTAMPDIFF(MONTH, DATE(cm.reg_date), "2017-09-30") as avg_m_order_cnt,
+SUM(o.amount) / TIMESTAMPDIFF(MONTH, DATE(cm.reg_date), "2017-09-30") as avg_m_order_sum,
+cm.member_birth as birth,
+cm.member_sex as sex,
+cm.gender,
+cm.member_age as age,
+cm.birthday as birthday,
+cm.f_marriage as married,
+cm.recommender,
+DATE(cm.reg_date) reg_date,
+DATE(cm.leave_date) leave_date,
+cm.status
+FROM cconma_member cm
+LEFT JOIN cconma_order o ON o.mem_no=cm.mem_no
+GROUP BY mem_no
+ORDER BY order_cnt desc;
+'
+
+mem.all <- fetch(q)
+mem.all$reg_date <- lubridate::ymd(mem.all$reg_date)
+mem.all$birthdate <- sapply(1:nrow(mem.all), function(x){
+  birth <- mem.all$birth[x];  birthday <- mem.all$birthday[x]
+  return(ifelse(!isEmpty(birthday), birthday, sprintf('%s-%s-%s',str_sub(birth,1,4),str_sub(birth,5,6),str_sub(birth,7,8)) ) )
+})
+mem.all$birthdate <- ymd(unlist(mem.all$birthdate))
+mem.all$age <- as.numeric((ymd('2017-09-30') - mem.all$birthdate) / 365.25)
+## fix ymd incorrectly assigned century prefix 20-- instead of 19--
+mem.all$birthdate[which(mem.all$age < 0)] <- paste0('19',str_sub(mem.all$birthdate[which(mem.all$age < 0)], 3,length(mem.all$birthdate[which(mem.all$age < 0)])))
+mem.all$age <- as.numeric((ymd('2017-09-30') - mem.all$birthdate) / 365.25)
+
+saveRDS(mem.all, file="cconma_mem_all_df.rds")
+##-------------------------------end all members--------------------------------------------------------
+
+
+
 ## READ members data frame
 mem <- readRDS('cconma_mem_df.rds')
 ##
@@ -299,6 +346,10 @@ mem <- merge(mem, followed, by.x='mem_no', by.y='followed_mem_no', all.x = T)
 
 saveRDS(mem, file="cconma_mem_df.rds")
 
+mem.all <- merge(mem.all, follower, by.x='mem_no', by.y='follower_mem_no', all.x = T)
+mem.all <- merge(mem.all, followed, by.x='mem_no', by.y='followed_mem_no', all.x = T)
+
+saveRDS(mem.all, file="cconma_mem_all_df.rds")
 
 ##---------------- MONTHLY FOLLOWER RELATIONS ----------------------
 
@@ -320,29 +371,46 @@ fl.cnt <- data.frame( pd=months,
                       stringsAsFactors = F)
 fl.lst <- list()
 
-for(i in 1:length(months)) {
+for(i in 2:length(months)) {
   pd <- months[i]
   cat(sprintf('\nquerying followers for pd: %s\n',pd ))
   tmp <- as.numeric(str_split(pd, '-')[[1]])
   y <- tmp[1]
   m <- tmp[2]
   d <- getMonthDays(m)
+  #
+  pd0 <- months[i-1]
+  tmp0 <- as.numeric(str_split(pd0, '-')[[1]])
+  y0 <- tmp0[1]
+  m0 <- tmp0[2]
+  d0 <- getMonthDays(m0)
+  #
+  el <- fetch(sprintf('SELECT follower_mem_no, following_mem_no, status, reg_date
+                            FROM cconma_memberfollow
+                      WHERE DATE(reg_date) >= DATE("%d-%d-%d")
+                      AND   DATE(reg_date) <= DATE("%d-%d-%d");',y0,m0,d0,y,m,d))
   follower <- fetch(sprintf('SELECT follower_mem_no, COUNT(follower_mem_no) follower_cnt
                             FROM cconma_memberfollow
-                            WHERE DATE(reg_date) <= DATE("%d-%d-%d")
-                            GROUP BY follower_mem_no; ',y,m,d))
+                            WHERE DATE(reg_date) >= DATE("%d-%d-%d")
+                            AND   DATE(reg_date) <= DATE("%d-%d-%d")
+                            GROUP BY follower_mem_no; ',y0,m0,d0,y,m,d))
   followed <- fetch(sprintf('SELECT following_mem_no followed_mem_no, COUNT(following_mem_no) followed_cnt
                             FROM cconma_memberfollow
-                            WHERE DATE(reg_date) <= DATE("%d-%d-%d")
-                            GROUP BY followed_mem_no; ',y,m,d))
+                            WHERE DATE(reg_date) >= DATE("%d-%d-%d")
+                            AND   DATE(reg_date) <= DATE("%d-%d-%d")
+                            GROUP BY followed_mem_no; ',y0,m0,d0,y,m,d))
   total <- fetch(sprintf('SELECT COUNT(DISTINCT id) cnt
                          FROM cconma_memberfollow
-                         WHERE DATE(reg_date) <= DATE("%d-%d-%d"); ',y,m,d))
+                         WHERE DATE(reg_date) >= DATE("%d-%d-%d")
+                         AND   DATE(reg_date) <= DATE("%d-%d-%d"); 
+                         ',y0,m0,d0,y,m,d))
   all <- fetch(sprintf('SELECT COUNT(DISTINCT mem_no) cnt
                          FROM cconma_member
-                         WHERE DATE(reg_date) <= DATE("%d-%d-%d"); ',y,m,d))
+                         WHERE DATE(reg_date) >= DATE("%d-%d-%d")
+                         AND   DATE(reg_date) <= DATE("%d-%d-%d"); 
+                       ',y0,m0,d0,y,m,d))
   if (nrow(follower) > 0 | nrow(followed) > 0) {
-    fl.lst[[pd]] <- list(follower=follower, followed=followed)
+    fl.lst[[pd]] <- list(follower=follower, followed=followed, el=el)
     fl.cnt$follower_cnt[fl.cnt$pd == pd] <- length(unique(follower$follower_mem_no))
     fl.cnt$followed_cnt[fl.cnt$pd == pd] <- length(unique(followed$followed_mem_no))
     fl.cnt$unique_mem_cnt[fl.cnt$pd == pd] <- length(unique(c(follower$follower_mem_no, followed$followed_mem_no)))
@@ -371,8 +439,10 @@ ggplot(aes(x=pd_last_date, y=value, colour=group), data=fl.cnt.w) +
   geom_line() + geom_point() +
   theme_bw()
 
+fl.cnt
 
 
+sapply(fl.lst, function(x)nrow(x$follower))
 # #---------------- QUANTITY BY MONTH ------------------------
 # 
 # qty <- fetch('
@@ -418,8 +488,11 @@ qtm <- fetch('
              ')
 qtm$t <- as.numeric(as.factor(qtm$pd))
 
+# saveRDS(list(mem=mem,qtm=qtm), file="cconma_mem_order_data.rds")
 
 saveRDS(list(mem=mem,fl.cnt=fl.cnt,fl.lst=fl.lst,qtm=qtm), file="cconma_data_list.rds")
+
+# mem <- readRDS(file = 'cconma_data_list.rds')
 
 # topmems <- mem$mem_no[c(2,3,4,10000,10001,10002)]
 # data.sub <- qtm[qtm$mem_no %in% topmems, ]
@@ -583,6 +656,363 @@ saveRDS(res, file="cconma_analysis_RESULTS_fixed_cutoff_pd.rds")
 
 
 
+
+
+
+
+
+
+
+##============================================================================
+## 
+## SNA MEMBER ORDER ANALYSIS  : TEMPORAL NETWORK AUTOCORRELATION MODEL
+##
+##----------------------------------------------------------------------------
+## inlcude two full months for lag
+pds.net.all <- c("2016-01", "2016-02", "2016-03", "2016-04", "2016-05", "2016-06", "2016-07", "2016-08",
+                 "2016-09", "2016-10", "2016-11", "2016-12", "2017-01", "2017-02", "2017-03", "2017-04",
+                 "2017-05", "2017-06", "2017-07", "2017-08", "2017-09")
+## drop first two full months (plus first partial month)
+pds.net <- c("2016-04", "2016-05", "2016-06", "2016-07", "2016-08",
+            "2016-09", "2016-10", "2016-11", "2016-12", "2017-01", "2017-02", "2017-03", "2017-04",
+            "2017-05", "2017-06", "2017-07", "2017-08", "2017-09")
+##------------------CONTROL MEMBERS--------------------------------------
+mem.ord <- unique(qtm$mem_no)
+mem.trt <- unique(c(fl.lst$`2017-09`$follower$follower_mem_no, fl.lst$`2017-09`$followed$followed_mem_no))
+# mem.trt <- unique(c(fl.lst$`2017-09`$follower$follower_mem_no))
+mem.ctrl <- mem.ord[which( !(mem.ord %in% mem.trt) )]
+cat(sprintf('ordered %s, treated %s, control %s', length(mem.ord),length(mem.trt),length(mem.ctrl)))
+## limit to members who ordered and have long enough duration
+mem.ctrl <- mem$mem_no[which(mem$mem_no %in% mem.ctrl & mem$reg_date <= '2014-01-25')]
+cat(sprintf('ordered %s, treated %s, duration control %s', length(mem.ord),length(mem.trt),length(mem.ctrl)))
+df.ctrl <- mem[which(mem$mem_no %in% mem.ctrl),]
+
+
+### view network adoption by followers & followed
+sapply(fl.lst, function(x)sapply(x,nrow))
+
+##------------------TREATMENT := FOLLOWER -------------------------------
+
+n <- length(fl.lst)
+el.pd <- fl.lst[[n]]$el
+vs.pd <- mem.all[which(mem.all$mem_no %in% el.pd$follower_mem_no | mem.all$mem_no %in% el.pd$following_mem_no), ]
+g.full <- igraph::graph.data.frame(el.pd, directed = T, vertices = vs.pd)
+igraph::write.graph(g.full, file="cconma_graph_full.graphml",format = "graphml")
+
+## save 1 period graph for visualization------
+tx <- '2016-06-30 00:00:00'
+mem.sub <- mem.all$mem_no[which(mem.all$follower_reg_date <= tx & mem.all$followed_reg_date <= tx)]
+g.sub <- igraph::induced.subgraph(g.full, 
+                                  vids=V(g.full)[which(as.integer(V(g.full)$name) %in% mem.sub)])
+g.sub <- igraph::delete.edges(g.sub,edges = E(g.sub)[which(E(g.sub)$reg_date > tx)])
+plot(g.sub,
+     vertex.size=5,vertex.label=NA,
+     edge.width=.4,edge.arrow.size=.5)
+edgeAttr <- igraph::as_data_frame(g.sub,what = 'edges')
+edf <- ldply(edgeAttr,.fun = function(x)x)
+vertAttr <- igraph::vertex.attributes(g.sub)
+write.csv(igraph::as_data_frame(g.sub, what = 'edges'),
+          file="cconma_sna_EDGES_16-6-30.csv",row.names = F)
+write.csv(igraph::as_data_frame(g.sub, what='vertices'),
+          file="cconma_sna_VERTICES_16-6-30.csv",row.names = F)
+write.graph(g.sub, file="cconma_sna_graph_16-6-30.graphml",format = "graphml")
+##---------------------------------------------
+
+sw <- c() ## SMALL WORLD COEFFICIENT
+for (lim in 1:20) {
+  mem.sub <- unique(c(fl.lst[[lim]]$el$follower_mem_no, fl.lst[[lim]]$el$following_mem_no))
+  g.sub <- igraph::induced.subgraph(g.full, vids=V(g.full)[which(as.integer(V(g.full)$name) %in% mem.sub)]  )
+  sw <- c(sw, igraph::transitivity(g.sub,type = 'global') / igraph::average.path.length(g.sub))
+}
+
+
+lim <- 3
+pd.test <- pds.net.all[1:lim]
+mem.sub <- unique(c(fl.lst[[lim]]$el$follower_mem_no,
+                    fl.lst[[lim]]$el$following_mem_no))
+length(unique(mem.sub))
+
+
+g.sub <- igraph::induced.subgraph(g.full, 
+                                 vids=V(g.full)[which(as.integer(V(g.full)$name) %in% mem.sub)]
+                                 )
+
+## CREATE DEPENDENT VARIABLE
+##   ORDER SUM
+df.qty <- data.frame(x=rep(NA,vcount(g.sub)))
+nl.test <- list()
+for (t in 1:length(pd.test)) {
+  pd <- pd.test[t]
+  date <- getYearMonthLastDate(yearMonth = pd)
+  dt <- sprintf("%s 00:00:00", date)
+  g.pd <- igraph::delete.edges(graph = g.sub, edges = E(g.sub)[which(E(g.sub)$reg_date >= dt)])
+  mat <- igraph::as_adjacency_matrix(graph = g.pd,type = 'both',names = F,sparse = F)
+  rownames(mat) <-  V(g.pd)$name
+  mat <- mat[order(as.integer(rownames(mat))), ]
+  nl.test[[pd]] <- mat
+  #
+  qtm.pd <- qtm[which(qtm$pd == pd), ]
+  tmp <- data.frame(mem_no=as.integer(V(g.pd)$name))
+  tmp <- merge(tmp,qtm.pd,by='mem_no',all.x=T,all.y=F)
+  tmp.data <- data.frame(x=tmp$rev_krw_sum)
+  names(tmp.data) <- pd
+  tmp.data[is.na(tmp.data[,pd]), pd] <- 0
+  row.names(tmp.data) <- tmp$mem_no
+  #
+  df.qty <- cbind(df.qty,tmp.data)
+  cat(pd);cat('\n')
+}; df.qty <- df.qty[,-1]
+head(df.qty)
+
+df.qty.log <- log(1 + df.qty)
+
+
+
+
+getPdGraph <- function(g.sub, pd) {
+  date <- getYearMonthLastDate(yearMonth = pd)
+  dt <- sprintf("%s 00:00:00", date)
+  g.pd <- igraph::delete.edges(graph = g.sub, edges = E(g.sub)[which(E(g.sub)$reg_date >= dt)])
+  return(g.pd)
+}
+
+
+
+##----------------------------------------
+sex <- lapply(pd.test,function(x){
+  x <- as.integer(as.factor(V(g.sub)$gender))
+  names(x) <- V(g.sub)$name
+  return(x)
+})
+names(sex) <- pd.test
+
+married <- lapply(pd.test,function(x){
+  x <- as.integer(as.factor(V(g.sub)$married))
+  names(x) <- V(g.sub)$name
+  return(x)
+})
+names(married) <- pd.test
+
+age <- lapply(pd.test,function(x){
+  x <- V(g.sub)$age
+  names(x) <- V(g.sub)$name
+  return(x)
+})
+names(age) <- pd.test
+
+##----------------------------------------
+constraint <- lapply(pd.test,function(x){
+  g.x <- getPdGraph(g.sub, x)
+  x <- igraph::constraint(g.x)
+  names(x) <- V(g.x)$name
+  return(x)
+})
+names(constraint) <- pd.test
+
+constraint <- lapply(pd.test,function(x){
+  g.x <- getPdGraph(g.sub, x)
+  x <- igraph::constraint(g.x)
+  names(x) <- V(g.x)$name
+  return(x)
+})
+names(constraint) <- pd.test
+
+cent.eig <- lapply(pd.test,function(x){
+  g.x <- getPdGraph(g.sub, x)
+  x <- igraph::eigen_centrality(g.x)$vector
+  names(x) <- V(g.x)$name
+  return(x)
+})
+names(cent.eig) <- pd.test
+
+cent.between <- lapply(pd.test,function(x){
+  g.x <- getPdGraph(g.sub, x)
+  x <- igraph::betweenness(g.x)
+  names(x) <- V(g.x)$name
+  return(x)
+})
+names(cent.between) <- pd.test
+
+cent.close <- lapply(pd.test,function(x){
+  g.x <- getPdGraph(g.sub, x)
+  x <- igraph::closeness(g.x)
+  names(x) <- V(g.x)$name
+  return(x)
+})
+names(cent.close) <- pd.test
+
+cent.deg.in <- lapply(pd.test,function(x){
+  g.x <- getPdGraph(g.sub, x)
+  x <- igraph::degree(g.x, mode = 'in')
+  names(x) <- V(g.x)$name
+  return(x)
+})
+names(cent.deg.in) <- pd.test
+
+cent.deg.out <- lapply(pd.test,function(x){
+  g.x <- getPdGraph(g.sub, x)
+  x <- igraph::degree(g.x, mode = 'out')
+  names(x) <- V(g.x)$name
+  return(x)
+})
+names(cent.deg.out) <- pd.test
+##-----------------------------------------------
+
+# row.names(df.qty) <- rownames(nl.test$`2016-01`)
+
+
+
+# cent.deg.in.df <- data.frame(x = rep(NA,length(cent.deg.in[[1]])))
+# for (i in 1:length(cent.deg.in)) {
+#   cent.deg.in.df <- cbind(cent.deg.in.df, cent.deg.in[[i]])
+#   names(cent.deg.in.df)[i+1] <- names(cent.deg.in)[i]
+# }; cent.deg.in.df <- cent.deg.in.df[,-1]
+
+
+
+m3 <- tnam(
+  df.qty.log ~ 
+    covariate(sex, coefname = "sex") + 
+    covariate(married, coefname = "married") + 
+    covariate(age, coefname = "age")  +
+    covariate(cent.deg.out, coefname = "cent.deg.out")  +
+    covariate(cent.deg.in, coefname = "cent.deg.in")  +
+    covariate(constraint, coefname = "constraint")  +
+    covariate(cent.eig, coefname = "cent.eig")  +
+    # covariate(cent.eig, coefname = "cent.between")  +
+    covariate(df.qty.log, lag = 1, exponent = 1) +
+    # interact(covariate(constraint, coefname = "constraint") ,
+    #          covariate(cent.eig, coefname = "cent.eig"), 
+    #          lag = 0, center = T, coefname = "constraint_cent.eig") +
+    # attribsim(df.qty.log, cent.deg.in, center = TRUE, coefname = "sim.deg.in") + 
+    netlag(df.qty.log, nl.test) +
+    netlag(df.qty.log, nl.test, pathdist = 2, decay = 1) +
+    netlag(df.qty.log, nl.test, lag = 1) ,
+  # degreedummy(df.qty, deg = 0, reverse = TRUE),
+  # centrality(df.qty, type = "betweenness"),
+  re.node = TRUE, 
+  re.time = TRUE, 
+  # time.linear = TRUE,
+  # family=Gamma(link = "inverse")
+  family=gaussian
+)
+
+screenreg(m3, digits = 3)
+
+saveRDS(list(g.sub=g.sub,df.qty=df.qty,ml.test=nl.test,m2=m2,m3=m3),file="cconma_tnam_pd9.rds")
+
+
+## centrality,  non-opportunisitic vs opportunistic  (rating?)
+## structural holes, 
+## number of roles
+
+
+  
+  ## period
+  # pd <- 21
+  cat(names(fl.lst)[pd]);cat("\n")
+  
+  ## build GROUP samples list
+  g <- list(y=data.frame(),  ## treatment data.frame
+            z1=data.frame(), ## control data.frame 1
+            z2=data.frame(), ## control data.frame 2
+            z=c(),           ## control mem_nos (1,2)
+            dropped=c()      ## droped mem_nos
+  )
+  
+  mem.trt.pd <- unique(fl.lst[[pd]]$follower$follower_mem_no, fl.lst[[pd]]$followed$followed_mem_no)
+  len <- length(mem.trt.pd)
+  cat(len)
+  for(i in 1:len) {
+    mem_i <- mem[which(mem$mem_no == mem.trt.pd[i]), ]
+    z.sub <- df.ctrl$mem_no[which( !(df.ctrl$mem_no %in% g$z)
+                                   & !(df.ctrl$mem_no %in% mem.trt.pd)
+                                   & !(df.ctrl$mem_no %in% g$dropped)
+                                   & df.ctrl$gender==mem_i$gender
+                                   & df.ctrl$married==mem_i$married
+                                   & df.ctrl$age >= (mem_i$age - sd(mem$age,na.rm = T))
+                                   & df.ctrl$age <= (mem_i$age + sd(mem$age,na.rm = T))
+                                   & df.ctrl$avg_m_order_sum >= (mem_i$avg_m_order_sum - sd(mem$avg_m_order_sum,na.rm = T))
+                                   & df.ctrl$avg_m_order_sum <= (mem_i$avg_m_order_sum + sd(mem$avg_m_order_sum,na.rm = T))
+    )]
+    if (length(z.sub) < 2) {
+      g$dropped = c(g$dropped, mem_i$mem_no)
+    } else {
+      g$y <- rbind(g$y, mem_i)
+      z <- sample(z.sub,size = 2, replace = F)
+      g$z <- c(g$z, z)
+      g$z1 <- rbind(g$z1, df.ctrl[which(df.ctrl$mem_no==z[1]),])
+      g$z2 <- rbind(g$z2, df.ctrl[which(df.ctrl$mem_no==z[2]),])
+      if (nrow(g$y) != nrow(g$z1) | nrow(g$y) != nrow(g$z2)) stop('mismatch')
+    }
+    if (i %% 50 == 0) cat(sprintf('%.1f%s\n',100*i/len,'%'))
+  }
+  
+  cat(sprintf('sample (treat, control): %s',nrow(g$y)))
+  g$mem_no <- list(y=unique(g$y$mem_no),
+                   z1=unique(g$z1$mem_no),
+                   z2=unique(g$z2$mem_no))
+  
+##------------ RUN CAUSAL IMPACT--------------------------------------
+  
+  
+  ## periods
+  pds <- unique(qtm$pd)
+  
+  ## CUTOFF DATES
+  cut.date.start <- as.Date('2014-01-01')  ## '-01-25'
+  cut.date.treat <- as.Date('2016-01-31')
+  ## GROUPS
+  # TREATMENT: members who existed a year before and eventually have relations
+  mem.treat <- g$mem_no$y
+  # CONTROL: members who existed a year before and never have a relation (or recommended anyone)
+  mem.ctrl <- g$mem_no$z2
+  # mem.ctrl <- sample(mem.ctrl, 10*length(mem.treat), replace = F)
+  cat(sprintf("\n%s treatment members, %s control members\n", length(mem.treat), length(mem.ctrl)))
+  ## create CausalImpact Data Frame
+  pds <- pds[ which(pds >= format.Date(cut.date.start, '%Y-%m') ) ]
+  dfqm <- data.frame(y=rep(NA,length(pds)),x=NA)
+  rownames(dfqm) <- pds
+  for (i in 1:length(pds)) {
+    pdi <- pds[i]
+    last.date <- getYearMonthLastDate(pdi)
+    # REVENUE BY GROUP IN PERIOD
+    qtm.pd.sub <- qtm[ qtm$pd == pdi , ]
+    sums.treat <- qtm.pd.sub$rev_krw_sum[ qtm.pd.sub$mem_no %in% mem.treat ]
+    sums.ctrl  <- qtm.pd.sub$rev_krw_sum[ qtm.pd.sub$mem_no %in% mem.ctrl ]
+    # COUNTS BY GROUP 
+    n.treat <- length(mem.treat)
+    n.ctrl <- length(mem.ctrl)
+    # CAUSALITY DATA FRAME
+    KRW_USD <- 1120
+    dfqm$y[i] <- ifelse(n.treat==0, 0,  log(sums.treat) / n.treat ) / KRW_USD
+    dfqm$x[i] <- ifelse(n.ctrl==0, 0,  log(sums.ctrl) / n.ctrl )  / KRW_USD
+  }
+  ## adjust dates format to create pre, post periods
+  dates <- as.Date(unname(sapply(rownames(dfqm),function(x)getYearMonthLastDate(x))))
+  pre <- c(dates[1], dates[which(dates==cut.date.treat)-1 ] )
+  post <- c(dates[ which(dates==cut.date.treat) ], dates[length(dates)])
+  ## format dates
+  dfqmz <- zoo(cbind(dfqm$y,dfqm$x), dates)
+
+  
+  
+  
+  
+  
+  
+  
+  
+  
+
+
+
+
+
+
+
+
+
 ##-----------------------------------------------------------------------------
 ## MOVING CUTOFF
 ##----------------------------------------------------------------------------
@@ -732,140 +1162,140 @@ saveRDS(res, file="cconma_analysis_RESULTS_moving_cutoff_pd.rds")
 
 
 
-##------------ RUN CAUSAL IMPACT--------------------------------------
-
-fl.lst
-
-
-pds <- unique(qtm$pd)
-
-## Treatment group
-## Members Joined within first 2 months
-mem.treat <- c()
-for (i in 1:length(fl.lst)) {
-  er <- fl.lst[[i]]$follower$follower_mem_no
-  ed <- fl.lst[[i]]$followed$followed_mem_no
-  mem.treat <- unique(c(mem.treat, er, ed))
-}
-
-## CUTOFF DATES
-cut.date.start <- as.Date('2012-01-01')  ## '-01-25'
-cut.date.treat <- as.Date('2015-12-31')
-## GROUPS
-# TREATMENT: members who existed a year before and eventually have relations
-mem.treat <- mem$mem_no[ which(mem$mem_no %in% mem.treat 
-                               & mem$reg_date <= cut.date.start 
-                               & mem$reg_date != 0
-                               ) ]
-# CONTROL: members who existed a year before and never have a relation (or recommended anyone)
-mem.ctrl <- mem$mem_no[ which( !(mem$mem_no %in% mem.treat) 
-                               & mem$reg_date <= cut.date.start 
-                               & !(mem$mem_no %in% mem$recommender)
-                               & mem$mem_no != 0
-                                 ) ]
-# mem.ctrl <- sample(mem.ctrl, 10*length(mem.treat), replace = F)
-
-cat(sprintf("\n%s treatment members, %s control members\n", length(mem.treat), length(mem.ctrl)))
-## create CausalImpact Data Frame
-pds <- pds[ which(pds >= format.Date(cut.date.start, '%Y-%m') ) ]
-dfqm <- data.frame(y=rep(NA,length(pds)),x=NA)
-rownames(dfqm) <- pds
-for (i in 1:length(pds)) {
-  pdi <- pds[i]
-  last.date <- getYearMonthLastDate(pdi)
-  # INDEXES FOR GROUPS
-  # treat.idx <- which(!is.na(mem$follower_reg_date) & mem$follower_reg_date < last.date)
-  # ctrl.idx <- which( is.na(mem$follower_reg_date) |  mem$follower_reg_date >= last.date)
-  # treat.idx <- which(mem$mem_no %in% mem.treat)
-  # ctrl.idx <- which( !(mem$mem_no %in% mem.treat) )
-  # mem.treat <- mem$mem_no[ treat.idx ]
-  # mem.ctrl <- mem$mem_no[ ctrl.idx ]
-  #
-  # REVENUE BY GROUP IN PERIOD
-  qtm.pd.sub <- qtm[ qtm$pd == pdi , ]
-  sums.treat <- qtm.pd.sub$rev_krw_sum[ qtm.pd.sub$mem_no %in% mem.treat ]
-  sums.ctrl  <- qtm.pd.sub$rev_krw_sum[ qtm.pd.sub$mem_no %in% mem.ctrl ]
-  # COUNTS BY GROUP 
-  # n.treat <- fl.cnt$follower_cnt[ fl.cnt$pd == pdi ]
-  # n.all   <- fl.cnt$mem_cnt[ fl.cnt$pd == pdi ]
-  # n.treat <- length(treat.idx)
-  # n.ctrl  <- n.all - n.treat
-  n.treat <- length(mem.treat)
-  n.ctrl <- length(mem.ctrl)
-  # CAUSALITY DATA FRAME
-  KRW_USD <- 1120
-  dfqm$y[i] <- ifelse(n.treat==0, 0,  sums.treat / n.treat ) / KRW_USD
-  dfqm$x[i] <- ifelse(n.ctrl==0, 0,  sums.ctrl / n.ctrl )  / KRW_USD
-}
-
-
-dates <- as.Date(unname(sapply(rownames(dfqm),function(x)getYearMonthLastDate(x))))
-pre <- c(dates[1], dates[which(dates==cut.date.treat)-1 ] )
-post <- c(dates[ which(dates==cut.date.treat) ], dates[length(dates)])
-
-dfqmz <- zoo(cbind(dfqm$y,dfqm$x), dates)
-impact <- CausalImpact(dfqmz, pre, post,
-                       alpha=0.01, model.args=list(nseasons=12))
-plot(impact)
-summary(impact)
-summary(impact, "report")
-impact$summary
-
-
-
-#----------------------------------------------------
-
-
-q <- '
-SELECT mem_no,
-CAST(MONTH(order_date) AS UNSIGNED) month,
-CAST(YEAR(order_date) AS UNSIGNED) yr,
-DATE_FORMAT(order_date,"%Y-%m") pd,
-SUM(amount) rev_krw_sum,
-AVG(amount) rev_krw_avg,
-STD(amount) rev_krw_std,
-FROM cconma_order co
-INNER JOIN 
-GROUP BY pd,mem_no
-ORDER BY pd asc;
-'
-con <- dbConnect(RMySQL::MySQL(), dbname = "cconma2", user="root", password="", port=3306)
-rs <- dbSendQuery(con, q)
-dff <- dbFetch(rs, n= -1)
-dbDisconnect(con)
-
-dff$t <- as.numeric(as.factor(dff$pd))
-
-dim(dff)
-head(dff)
-
-
-xyplot(rev_krw_avg ~ pd, groups=is_followed, data=dffs, type=c('p','r','g'), auto.key =T )
-
-
-dffsw <- data.frame(y=dff[dff$is_followed==1,c('rev_krw_avg')],
-                    x=dff[dff$is_followed==0,c('rev_krw_avg')],
-                    pd=unique(dff$pd),
-                    t=1:length(unique(dff$pd)))
-
-pre <- c(1, which(dffsw$pd=='2016-02')-1)
-post <- c(which(dffsw$pd=='2016-02'), nrow(dffsw))
-
-impact <- CausalImpact(dffsw[,c('y','x')], pre, post,
-                       alpha=0.05, model.args=list(nseasons=12))
-plot(impact)
-summary(impact)
-summary(impact, "report")
-impact$summary
-#----------------- CAUSAL IMPACT ------------------------------------
-
-
-
-pre.period <- as.Date(c("2014-01-01", "2014-03-11"))
-post.period <- as.Date(c("2014-03-12", "2014-04-10"))
-
-impact <- CausalImpact(data, pre.period, post.period)
-plot(impact)
-summary(impact)
-summary(impact, "report")
-impact$summary
+# ##------------ RUN CAUSAL IMPACT--------------------------------------
+# 
+# fl.lst
+# 
+# 
+# pds <- unique(qtm$pd)
+# 
+# ## Treatment group
+# ## Members Joined within first 2 months
+# mem.treat <- c()
+# for (i in 1:length(fl.lst)) {
+#   er <- fl.lst[[i]]$follower$follower_mem_no
+#   ed <- fl.lst[[i]]$followed$followed_mem_no
+#   mem.treat <- unique(c(mem.treat, er, ed))
+# }
+# 
+# ## CUTOFF DATES
+# cut.date.start <- as.Date('2012-01-01')  ## '-01-25'
+# cut.date.treat <- as.Date('2015-12-31')
+# ## GROUPS
+# # TREATMENT: members who existed a year before and eventually have relations
+# mem.treat <- mem$mem_no[ which(mem$mem_no %in% mem.treat 
+#                                & mem$reg_date <= cut.date.start 
+#                                & mem$reg_date != 0
+#                                ) ]
+# # CONTROL: members who existed a year before and never have a relation (or recommended anyone)
+# mem.ctrl <- mem$mem_no[ which( !(mem$mem_no %in% mem.treat) 
+#                                & mem$reg_date <= cut.date.start 
+#                                & !(mem$mem_no %in% mem$recommender)
+#                                & mem$mem_no != 0
+#                                  ) ]
+# # mem.ctrl <- sample(mem.ctrl, 10*length(mem.treat), replace = F)
+# 
+# cat(sprintf("\n%s treatment members, %s control members\n", length(mem.treat), length(mem.ctrl)))
+# ## create CausalImpact Data Frame
+# pds <- pds[ which(pds >= format.Date(cut.date.start, '%Y-%m') ) ]
+# dfqm <- data.frame(y=rep(NA,length(pds)),x=NA)
+# rownames(dfqm) <- pds
+# for (i in 1:length(pds)) {
+#   pdi <- pds[i]
+#   last.date <- getYearMonthLastDate(pdi)
+#   # INDEXES FOR GROUPS
+#   # treat.idx <- which(!is.na(mem$follower_reg_date) & mem$follower_reg_date < last.date)
+#   # ctrl.idx <- which( is.na(mem$follower_reg_date) |  mem$follower_reg_date >= last.date)
+#   # treat.idx <- which(mem$mem_no %in% mem.treat)
+#   # ctrl.idx <- which( !(mem$mem_no %in% mem.treat) )
+#   # mem.treat <- mem$mem_no[ treat.idx ]
+#   # mem.ctrl <- mem$mem_no[ ctrl.idx ]
+#   #
+#   # REVENUE BY GROUP IN PERIOD
+#   qtm.pd.sub <- qtm[ qtm$pd == pdi , ]
+#   sums.treat <- qtm.pd.sub$rev_krw_sum[ qtm.pd.sub$mem_no %in% mem.treat ]
+#   sums.ctrl  <- qtm.pd.sub$rev_krw_sum[ qtm.pd.sub$mem_no %in% mem.ctrl ]
+#   # COUNTS BY GROUP 
+#   # n.treat <- fl.cnt$follower_cnt[ fl.cnt$pd == pdi ]
+#   # n.all   <- fl.cnt$mem_cnt[ fl.cnt$pd == pdi ]
+#   # n.treat <- length(treat.idx)
+#   # n.ctrl  <- n.all - n.treat
+#   n.treat <- length(mem.treat)
+#   n.ctrl <- length(mem.ctrl)
+#   # CAUSALITY DATA FRAME
+#   KRW_USD <- 1120
+#   dfqm$y[i] <- ifelse(n.treat==0, 0,  sums.treat / n.treat ) / KRW_USD
+#   dfqm$x[i] <- ifelse(n.ctrl==0, 0,  sums.ctrl / n.ctrl )  / KRW_USD
+# }
+# 
+# 
+# dates <- as.Date(unname(sapply(rownames(dfqm),function(x)getYearMonthLastDate(x))))
+# pre <- c(dates[1], dates[which(dates==cut.date.treat)-1 ] )
+# post <- c(dates[ which(dates==cut.date.treat) ], dates[length(dates)])
+# 
+# dfqmz <- zoo(cbind(dfqm$y,dfqm$x), dates)
+# impact <- CausalImpact(dfqmz, pre, post,
+#                        alpha=0.01, model.args=list(nseasons=12))
+# plot(impact)
+# summary(impact)
+# summary(impact, "report")
+# impact$summary
+# 
+# 
+# 
+# #----------------------------------------------------
+# 
+# 
+# q <- '
+# SELECT mem_no,
+# CAST(MONTH(order_date) AS UNSIGNED) month,
+# CAST(YEAR(order_date) AS UNSIGNED) yr,
+# DATE_FORMAT(order_date,"%Y-%m") pd,
+# SUM(amount) rev_krw_sum,
+# AVG(amount) rev_krw_avg,
+# STD(amount) rev_krw_std,
+# FROM cconma_order co
+# INNER JOIN 
+# GROUP BY pd,mem_no
+# ORDER BY pd asc;
+# '
+# con <- dbConnect(RMySQL::MySQL(), dbname = "cconma2", user="root", password="", port=3306)
+# rs <- dbSendQuery(con, q)
+# dff <- dbFetch(rs, n= -1)
+# dbDisconnect(con)
+# 
+# dff$t <- as.numeric(as.factor(dff$pd))
+# 
+# dim(dff)
+# head(dff)
+# 
+# 
+# xyplot(rev_krw_avg ~ pd, groups=is_followed, data=dffs, type=c('p','r','g'), auto.key =T )
+# 
+# 
+# dffsw <- data.frame(y=dff[dff$is_followed==1,c('rev_krw_avg')],
+#                     x=dff[dff$is_followed==0,c('rev_krw_avg')],
+#                     pd=unique(dff$pd),
+#                     t=1:length(unique(dff$pd)))
+# 
+# pre <- c(1, which(dffsw$pd=='2016-02')-1)
+# post <- c(which(dffsw$pd=='2016-02'), nrow(dffsw))
+# 
+# impact <- CausalImpact(dffsw[,c('y','x')], pre, post,
+#                        alpha=0.05, model.args=list(nseasons=12))
+# plot(impact)
+# summary(impact)
+# summary(impact, "report")
+# impact$summary
+# #----------------- CAUSAL IMPACT ------------------------------------
+# 
+# 
+# 
+# pre.period <- as.Date(c("2014-01-01", "2014-03-11"))
+# post.period <- as.Date(c("2014-03-12", "2014-04-10"))
+# 
+# impact <- CausalImpact(data, pre.period, post.period)
+# plot(impact)
+# summary(impact)
+# summary(impact, "report")
+# impact$summary
